@@ -1,0 +1,171 @@
+version: '3.9'
+
+services:
+  aerospike-server:
+    container_name: aerospike-server
+    image: aerospike/aerospike-server:6.3.0.0_1
+    ports:
+      - '3001:3001'
+      - '3010:3000'
+      - '3012:3002'
+    restart: unless-stopped
+
+  clickhouse-server:
+    container_name: clickhouse-server
+    image: clickhouse/clickhouse-server:23.4.1.1943-alpine
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: user
+      CLICKHOUSE_PASSWORD: password
+    ports:
+      - 8123:8123
+      - 8443:8443
+      - 9000:9000/tcp
+    restart: unless-stopped
+
+  zookeeper:
+    container_name: zookeeper
+    image: confluentinc/cp-zookeeper:7.3.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - '22181:2181'
+    restart: unless-stopped
+
+  kafka:
+    container_name: kafka
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  exporter:
+    image:  aerospike/aerospike-prometheus-exporter:latest
+    ports:
+      - 9145:9145
+    environment:
+      - AS_HOST=aerospike-server
+      - AS_PORT=3000
+      - METRIC_LABELS=type='development',source='aerospike-server'
+
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter
+    command: [ "--kafka.server=kafka:9092"]
+    ports:
+      - 9308:9308
+      
+  init-kafka:
+    container_name: init_data
+    image: confluentinc/cp-kafka:7.3.1
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics --bootstrap-server kafka:9092 --list
+
+      echo -e 'Creating kafka topics'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic core_connector --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic core_client --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic vsp_client --replication-factor 1 --partitions 1
+
+      echo -e 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
+
+  jaeger-allinone:
+    container_name: jaeger-tracing
+    image: jaegertracing/all-in-one:1
+    ports:
+      - 6831:6831
+      - 6832:6832
+      - 16686:16686
+      - 14268:14268
+      - 9411:9411
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - /Users/amnikiforo/Desktop/dev/docker_files/prometheus.yml:/etc/prometheus/prometheus.yml
+    container_name: prometheus
+    depends_on:
+      - kafka-exporter
+      - exporter
+    hostname: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - 9090:9090
+    restart: unless-stopped
+    environment:
+      TZ: "Europe/Moscow"
+    networks:
+      - default
+  
+  grafana:
+    image: grafana/grafana
+    user: root
+    depends_on:
+      - prometheus
+    ports:
+      - 3002:3002
+    volumes:
+      - 'grafana_storage:/var/lib/grafana'
+    container_name: grafana
+    hostname: grafana
+    restart: unless-stopped
+    networks:
+      - default
+
+  openldap:
+    container_name: bitnami-openldap
+    image: bitnami/openldap:2.6.4
+    ports:
+      - '1389:1389'
+      - '1636:1636'
+    environment:
+      - LDAP_BIND_DN=cn=admin,dc=example,dc=org
+      - LDAP_USERS=user01,user02
+      - LDAP_PASSWORDS=password1,password2
+      - LDAP_ORGANISATION=example
+      - LDAP_DOMAIN=example.org
+      - LDAP_ADMIN_USERNAME=admin
+      - LDAP_ADMIN_PASSWORD=adminpassword
+      - LDAP_CONFIG_PASSWORD=config_pass
+      - "LDAP_BASE_DN=dc=example,dc=org"
+      - LDAP_READONLY_USER=true
+      - LDAP_READONLY_USER_USERNAME=user-ro
+      - LDAP_READONLY_USER_PASSWORD=ro_pass
+    restart: unless-stopped
+
+  akhq:
+    container_name: akhq
+    image: tchiotludo/akhq
+    restart: unless-stopped
+    ports:
+      - "8095:8080"
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "kafka:9092"
+              schema-registry:
+                url: "http://schema-registry:8099"
+      
+volumes:
+  grafana_storage: {}
